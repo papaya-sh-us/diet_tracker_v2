@@ -21,9 +21,7 @@ export const C = {
   pink:         "#f472b6",
 };
 
-// Date keys use LOCAL time (not UTC). Using toISOString() previously shifted
-// the key to UTC, so anything logged late at night in IST could land on the
-// wrong calendar day. These build a true local midnight-to-midnight YYYY-MM-DD.
+// Date keys use LOCAL time (not UTC).
 function localKey(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -31,29 +29,18 @@ function localKey(d) {
   return `${y}-${m}-${day}`;
 }
 
-export function todayKey() {
-  return localKey(new Date());
-}
-
-export function dateKey(d) {
-  return localKey(d);
-}
-
-export function parseDate(key) {
-  return new Date(key + "T00:00:00");
-}
+export function todayKey() { return localKey(new Date()); }
+export function dateKey(d) { return localKey(d); }
+export function parseDate(key) { return new Date(key + "T00:00:00"); }
 
 export function daysBetween(a, b) {
   const ms = parseDate(b) - parseDate(a);
   return Math.round(ms / (1000 * 60 * 60 * 24));
 }
 
-export function isToday(key) {
-  return key === todayKey();
-}
+export function isToday(key) { return key === todayKey(); }
 
 export function isRecentlyDetailed(key) {
-  // True if within last 2 days (full detail still kept)
   const diff = daysBetween(key, todayKey());
   return diff >= 0 && diff <= 2;
 }
@@ -64,12 +51,10 @@ export const CORE_KEYS = [
   "iron","calcium","b12","zinc","vitC","vitD",
 ];
 
-// Scale a food's nutrients to a quantity over ANY set of keys (FIX #4).
-// `keys` lets custom nutrients (sodium, magnesium, …) flow through; defaults
-// to the core set for backward compatibility with existing callers.
+// Scale a food's nutrients to a quantity over ANY set of keys.
 export function scaleNutrients(food, qty, keys = CORE_KEYS) {
   if (!food) return {};
-  const ratio = qty / food.qty;
+  const ratio = qty / (food.qty || 100);
   const decimals = { kcal: 1, calcium: 1, vitC: 1 };
   const out = {};
   for (const k of keys) {
@@ -77,6 +62,14 @@ export function scaleNutrients(food, qty, keys = CORE_KEYS) {
     out[k] = +(((food[k] || 0) * ratio)).toFixed(dp);
   }
   return out;
+}
+
+// Scale cost: costPer100 is ₹ per food.qty units (not per 100g).
+// Returns cost in ₹ for a given qty logged.
+export function scaleCost(food, qty) {
+  if (!food || !food.costPer100) return 0;
+  const ratio = qty / (food.qty || 100);
+  return +(food.costPer100 * ratio).toFixed(2);
 }
 
 export function emptyTotals(keys = CORE_KEYS) {
@@ -104,4 +97,31 @@ export function formatDateShort(key) {
   return parseDate(key).toLocaleDateString("en-IN", {
     day: "numeric", month: "short",
   });
+}
+
+// Compute aggregate nutrients for a recipe given ingredient foods and a qty
+// scale factor. ingredientQtys overrides the recipe's default per-ingredient qty.
+export function recipeNutrients(recipe, foodMap, scaleFactor = 1, keys = CORE_KEYS, ingredientQtyOverrides = {}) {
+  const out = emptyTotals(keys);
+  if (!recipe || !recipe.ingredients) return out;
+  recipe.ingredients.forEach(ing => {
+    const food = foodMap[ing.foodId];
+    if (!food) return;
+    const qty = (ingredientQtyOverrides[ing.foodId] ?? ing.qty) * scaleFactor;
+    const n = scaleNutrients(food, qty, keys);
+    keys.forEach(k => { out[k] = +((out[k] || 0) + (n[k] || 0)).toFixed(2); });
+  });
+  return out;
+}
+
+export function recipeCost(recipe, foodMap, scaleFactor = 1, ingredientQtyOverrides = {}) {
+  if (!recipe || !recipe.ingredients) return 0;
+  let total = 0;
+  recipe.ingredients.forEach(ing => {
+    const food = foodMap[ing.foodId];
+    if (!food) return;
+    const qty = (ingredientQtyOverrides[ing.foodId] ?? ing.qty) * scaleFactor;
+    total += scaleCost(food, qty);
+  });
+  return +total.toFixed(2);
 }

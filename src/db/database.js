@@ -3,7 +3,7 @@
 //
 // Stores:
 //   - foods       → editable food database (overrides + custom entries)
-//   - dayLogs     → full meal-level detail per day (auto-purged after 2 days)
+//   - dayLogs     → full meal-level detail per day
 //   - dayTotals   → aggregated nutrient totals per day (kept forever)
 //   - settings    → targets and preferences
 //
@@ -13,18 +13,19 @@
 //   await getDayLog(dateStr) / saveDayLog(dateStr, log)
 //   await getDayTotals(dateStr) / saveDayTotals(dateStr, totals)
 //   await getAllDayTotals()
-//   await purgeOldLogs() — call on app startup; keeps last 2 days + today
-//   await getSettings() / saveSettings(settings)
+//   await purgeOldLogs() — no-op, kept for compat
+//   await getSettings() / saveSetting(key, value)
 //   await exportAll() / importAll(data)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DB_NAME = "yashus-tracker";
-const DB_VERSION = 1;
+const DB_VERSION = 2;          // bumped to add recipes store
 const STORES = {
   foods: "foods",
   dayLogs: "dayLogs",
   dayTotals: "dayTotals",
   settings: "settings",
+  recipes: "recipes",          // NEW: recipe definitions
 };
 
 let _db = null;
@@ -48,6 +49,9 @@ export function openDB() {
       }
       if (!db.objectStoreNames.contains(STORES.settings)) {
         db.createObjectStore(STORES.settings, { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains(STORES.recipes)) {
+        db.createObjectStore(STORES.recipes, { keyPath: "id" });
       }
     };
   });
@@ -91,7 +95,26 @@ export async function deleteFood(id) {
   return promisifyRequest(store.delete(id));
 }
 
-// ─── DAY LOGS (full detail; auto-purged) ────────────────────────
+// ─── RECIPES ─────────────────────────────────────────────────────
+// A recipe: { id, name, servings, ingredients:[{foodId, qty}] }
+// When logged, it's stored as a single row with rowType:"recipe" and recipeId.
+// Per-day ingredient qty tweaks live in the row's state.ingredientQtys map.
+export async function getAllRecipes() {
+  const store = await tx(STORES.recipes);
+  return promisifyRequest(store.getAll());
+}
+
+export async function saveRecipe(recipe) {
+  const store = await tx(STORES.recipes, "readwrite");
+  return promisifyRequest(store.put(recipe));
+}
+
+export async function deleteRecipe(id) {
+  const store = await tx(STORES.recipes, "readwrite");
+  return promisifyRequest(store.delete(id));
+}
+
+// ─── DAY LOGS (full detail) ──────────────────────────────────────
 export async function getDayLog(date) {
   const store = await tx(STORES.dayLogs);
   return promisifyRequest(store.get(date));
@@ -128,14 +151,8 @@ export async function getAllDayTotals() {
   return promisifyRequest(store.getAll());
 }
 
-// ─── PURGE (DISABLED) ───────────────────────────────────────────
-// Previously this deleted full meal detail older than 2 days, which made past
-// days read-only (you could see totals but not edit the meals). Your data is
-// tiny — a detailed day is a few KB — so we now keep full detail for every day,
-// making any past day fully editable. Kept as a no-op so existing callers work.
-export async function purgeOldLogs() {
-  return; // intentionally does nothing
-}
+// ─── PURGE (no-op, kept for compat) ─────────────────────────────
+export async function purgeOldLogs() { return; }
 
 // ─── SETTINGS ───────────────────────────────────────────────────
 export async function getSettings() {
@@ -151,9 +168,7 @@ export async function saveSetting(key, value) {
   return promisifyRequest(store.put({ key, value }));
 }
 
-// ─── PINNED FOODS (FIX #2) ──────────────────────────────────────
-// Per-meal recurring foods. Stored as settings row "pinnedFoods":
-//   { breakfast:[{foodId,qty}], lunch:[...], snack:[...], dinner:[...] }
+// ─── PINNED FOODS ────────────────────────────────────────────────
 export async function getPinnedFoods() {
   const s = await getSettings();
   const p = s.pinnedFoods;
@@ -163,9 +178,7 @@ export async function savePinnedFoods(pins) {
   return saveSetting("pinnedFoods", pins);
 }
 
-// ─── CUSTOM NUTRIENTS (FIX #4) ──────────────────────────────────
-// Settings row "customNutrients": array of
-//   { key, label, unit, target, type:"micro", custom:true }
+// ─── CUSTOM NUTRIENTS ────────────────────────────────────────────
 export async function getCustomNutrients() {
   const s = await getSettings();
   return Array.isArray(s.customNutrients) ? s.customNutrients : [];
@@ -174,8 +187,7 @@ export async function saveCustomNutrients(list) {
   return saveSetting("customNutrients", list);
 }
 
-// ─── VISIBLE NUTRIENT CARDS (FIX #4) ────────────────────────────
-// Which small cards show on the dashboard. Settings row "visibleCards".
+// ─── VISIBLE NUTRIENT CARDS ──────────────────────────────────────
 export async function getVisibleCards() {
   const s = await getSettings();
   return Array.isArray(s.visibleCards) ? s.visibleCards : null;
@@ -186,43 +198,27 @@ export async function saveVisibleCards(keys) {
 
 // ─── EXPORT / IMPORT ────────────────────────────────────────────
 export async function exportAll() {
-  const [foods, logs, totals, settings] = await Promise.all([
+  const [foods, logs, totals, settings, recipes] = await Promise.all([
     getAllFoods(),
     getAllDayLogs(),
     getAllDayTotals(),
     getSettings(),
+    getAllRecipes(),
   ]);
-  return {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    foods, logs, totals, settings,
-  };
+  return { version: 2, exportedAt: new Date().toISOString(), foods, logs, totals, settings, recipes };
 }
 
 export async function importAll(data) {
-  if (!data || data.version !== 1) throw new Error("Invalid backup file");
-  // Foods
+  if (!data || (data.version !== 1 && data.version !== 2)) throw new Error("Invalid backup file");
   for (const f of (data.foods || [])) await saveFood(f);
-  // Logs
-  for (const l of (data.logs || [])) {
-    const { date, ...rest } = l;
-    await saveDayLog(date, rest);
-  }
-  // Totals
-  for (const t of (data.totals || [])) {
-    const { date, ...rest } = t;
-    await saveDayTotals(date, rest);
-  }
-  // Settings
-  for (const [k, v] of Object.entries(data.settings || {})) {
-    await saveSetting(k, v);
-  }
+  for (const l of (data.logs || [])) { const { date, ...rest } = l; await saveDayLog(date, rest); }
+  for (const t of (data.totals || [])) { const { date, ...rest } = t; await saveDayTotals(date, rest); }
+  for (const [k, v] of Object.entries(data.settings || {})) await saveSetting(k, v);
+  for (const r of (data.recipes || [])) await saveRecipe(r);
 }
 
 // ─── SEEDING ────────────────────────────────────────────────────
 export async function seedFoodsIfEmpty(initialFoods) {
   const existing = await getAllFoods();
-  if (existing.length === 0) {
-    await saveFoodsBulk(initialFoods);
-  }
+  if (existing.length === 0) await saveFoodsBulk(initialFoods);
 }

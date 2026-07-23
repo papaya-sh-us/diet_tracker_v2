@@ -8,7 +8,12 @@
 //
 // Schema per food: { id, name, category, qty, unit, protein, kcal, satFat,
 //                    carbs, fibre, iron, calcium, b12, zinc, vitC, vitD,
-//                    confidence, notes }
+//                    confidence, notes, costInRupees }
+//
+// costInRupees is optional — the price of `qty``unit` of this food, in ₹.
+// Leave it unset (or 0) for foods you don't want to price-track; the app
+// simply hides the cost figure for those. It scales with quantity the same
+// way nutrients do.
 //
 // You can edit any of these values in the app. Custom foods you add will
 // be saved with confidence: "custom".

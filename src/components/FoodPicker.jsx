@@ -68,6 +68,7 @@ export function FoodPicker({ onPick, onClose, mode = "pick", allNutrients, custo
                 </div>
                 <div style={{ fontSize:11, color:C.muted }}>
                   per {food.qty}{food.unit?` ${food.unit}`:""} · {food.protein}g P · {food.kcal} kcal
+                  {food.costInRupees > 0 && <span> · ₹{food.costInRupees}</span>}
                 </div>
               </div>
               {mode === "pick" && (
@@ -99,7 +100,7 @@ export function FoodEditor({ food, onClose, onSaved, allNutrients = [], customNu
   const nutrients = allNutrients.length ? allNutrients : [];
 
   function makeBlank() {
-    const b = { id:`custom_${Date.now()}`, name:"", category:"prepared", qty:100, unit:"g", confidence:"custom", notes:"" };
+    const b = { id:`custom_${Date.now()}`, name:"", category:"prepared", qty:100, unit:"g", costInRupees:0, confidence:"custom", notes:"" };
     nutrients.forEach(n => b[n.key] = 0);
     return b;
   }
@@ -154,6 +155,11 @@ export function FoodEditor({ food, onClose, onSaved, allNutrients = [], customNu
             {FOOD_CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </div>
+      </div>
+
+      <div style={{ marginBottom:10 }}>
+        <label style={{ fontSize:11, color:C.muted }}>Cost (₹ per {form.qty}{form.unit}) — optional</label>
+        <NumberInput value={form.costInRupees ?? 0} onChange={v => set("costInRupees", v)}/>
       </div>
 
       <div style={{ fontSize:11, color:C.muted, margin:"4px 0 6px", fontWeight:600 }}>NUTRIENTS</div>
