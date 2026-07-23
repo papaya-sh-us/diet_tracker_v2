@@ -6,6 +6,10 @@
 //   - dayLogs     → full meal-level detail per day
 //   - dayTotals   → aggregated nutrient totals per day (kept forever)
 //   - settings    → targets and preferences
+//   - recipes     → recipe definitions
+//   - bodyLog     → one record per date: weight, measurements, water, supplements
+//   - bodyPhotos  → one record per date+angle: compressed image blob + thumbnail
+//   - supplements → user-defined supplement/medicine list
 //
 // Public API:
 //   await openDB()
@@ -15,17 +19,24 @@
 //   await getAllDayTotals()
 //   await purgeOldLogs() — no-op, kept for compat
 //   await getSettings() / saveSetting(key, value)
+//   await getBodyProfile() / saveBodyProfile({ heightCm, dob, sex })
+//   await getBodyLog(dateStr) / saveBodyLog(dateStr, entry) / getAllBodyLogs()
+//   await getAllSupplements() / saveSupplement(s) / deleteSupplement(id)
+//   await getPhoto(date, angle) / savePhoto(rec) / getPhotosForDate(date)
 //   await exportAll() / importAll(data)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DB_NAME = "yashus-tracker";
-const DB_VERSION = 2;          // bumped to add recipes store
+const DB_VERSION = 3;          // bumped to add Body Log stores
 const STORES = {
   foods: "foods",
   dayLogs: "dayLogs",
   dayTotals: "dayTotals",
   settings: "settings",
-  recipes: "recipes",          // NEW: recipe definitions
+  recipes: "recipes",
+  bodyLog: "bodyLog",          // NEW: weight / measurements / water / supplements
+  bodyPhotos: "bodyPhotos",    // NEW: compressed progress photos
+  supplements: "supplements",  // NEW: supplement definitions
 };
 
 let _db = null;
@@ -52,6 +63,15 @@ export function openDB() {
       }
       if (!db.objectStoreNames.contains(STORES.recipes)) {
         db.createObjectStore(STORES.recipes, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORES.bodyLog)) {
+        db.createObjectStore(STORES.bodyLog, { keyPath: "date" });
+      }
+      if (!db.objectStoreNames.contains(STORES.bodyPhotos)) {
+        db.createObjectStore(STORES.bodyPhotos, { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains(STORES.supplements)) {
+        db.createObjectStore(STORES.supplements, { keyPath: "id" });
       }
     };
   });
@@ -196,25 +216,153 @@ export async function saveVisibleCards(keys) {
   return saveSetting("visibleCards", keys);
 }
 
+// ─── BODY PROFILE (height / dob / sex) ──────────────────────────
+// Lives in settings, not in every body entry, so correcting height
+// retroactively fixes every computed body-fat number.
+const DEFAULT_BODY_PROFILE = { heightCm: null, dob: null, sex: "male" };
+
+export async function getBodyProfile() {
+  const s = await getSettings();
+  const p = (s.bodyProfile && typeof s.bodyProfile === "object") ? s.bodyProfile : {};
+  return { ...DEFAULT_BODY_PROFILE, ...p };
+}
+
+export async function saveBodyProfile(profile) {
+  const current = await getBodyProfile();
+  return saveSetting("bodyProfile", { ...current, ...profile });
+}
+
+// ─── BODY LOG (one record per date) ─────────────────────────────
+// Shape (every field optional):
+// {
+//   date: "2026-07-23",
+//   weightKg: 89.4,
+//   measurements: { chest, waist, hip, arm, thigh, calf, neck, shoulders },  // cm
+//   water: [ { ts, ml } ],                       // total is derived
+//   supplements: [ { defId, name, dose, unit, ts } ],  // name/dose snapshotted
+//   notes: ""
+// }
+export async function getBodyLog(date) {
+  const store = await tx(STORES.bodyLog);
+  return promisifyRequest(store.get(date));
+}
+
+export async function saveBodyLog(date, entry) {
+  const store = await tx(STORES.bodyLog, "readwrite");
+  return promisifyRequest(store.put({ ...entry, date }));
+}
+
+export async function getAllBodyLogs() {
+  const store = await tx(STORES.bodyLog);
+  return promisifyRequest(store.getAll());
+}
+
+export async function deleteBodyLog(date) {
+  const store = await tx(STORES.bodyLog, "readwrite");
+  return promisifyRequest(store.delete(date));
+}
+
+// Merge helper: read-modify-write a single day without clobbering other fields.
+export async function patchBodyLog(date, patch) {
+  const existing = (await getBodyLog(date)) || { date };
+  const merged = { ...existing, ...patch, date };
+  if (patch.measurements) {
+    merged.measurements = { ...(existing.measurements || {}), ...patch.measurements };
+  }
+  await saveBodyLog(date, merged);
+  return merged;
+}
+
+// ─── SUPPLEMENTS (definitions) ──────────────────────────────────
+// { id, name, dose, unit, active }
+export async function getAllSupplements() {
+  const store = await tx(STORES.supplements);
+  return promisifyRequest(store.getAll());
+}
+
+export async function saveSupplement(supp) {
+  const store = await tx(STORES.supplements, "readwrite");
+  return promisifyRequest(store.put(supp));
+}
+
+export async function deleteSupplement(id) {
+  const store = await tx(STORES.supplements, "readwrite");
+  return promisifyRequest(store.delete(id));
+}
+
+// ─── BODY PHOTOS ────────────────────────────────────────────────
+// Key is `${date}|${angle}`, e.g. "2026-07-23|front".
+// { key, date, angle, blob, thumb, width, height, bytes, capturedAt }
+export const PHOTO_ANGLES = ["front", "back", "left", "right"];
+
+export function photoKey(date, angle) {
+  return `${date}|${angle}`;
+}
+
+export async function getPhoto(date, angle) {
+  const store = await tx(STORES.bodyPhotos);
+  return promisifyRequest(store.get(photoKey(date, angle)));
+}
+
+export async function savePhoto(rec) {
+  const store = await tx(STORES.bodyPhotos, "readwrite");
+  return promisifyRequest(store.put({ ...rec, key: photoKey(rec.date, rec.angle) }));
+}
+
+export async function deletePhoto(date, angle) {
+  const store = await tx(STORES.bodyPhotos, "readwrite");
+  return promisifyRequest(store.delete(photoKey(date, angle)));
+}
+
+// All four angles for one date, via a key range on the "date|" prefix.
+export async function getPhotosForDate(date) {
+  const store = await tx(STORES.bodyPhotos);
+  const range = IDBKeyRange.bound(`${date}|`, `${date}|\uffff`);
+  return promisifyRequest(store.getAll(range));
+}
+
+// Keys only — cheap enough to call for a whole year without loading blobs.
+export async function getAllPhotoKeys() {
+  const store = await tx(STORES.bodyPhotos);
+  return promisifyRequest(store.getAllKeys());
+}
+
+export async function getPhotoDates() {
+  const keys = await getAllPhotoKeys();
+  return [...new Set(keys.map(k => String(k).split("|")[0]))].sort();
+}
+
 // ─── EXPORT / IMPORT ────────────────────────────────────────────
+// Photo blobs are deliberately NOT included here — this stays a small,
+// fast JSON file. Photos export separately as a zip.
 export async function exportAll() {
-  const [foods, logs, totals, settings, recipes] = await Promise.all([
+  const [foods, logs, totals, settings, recipes, bodyLogs, supplements] = await Promise.all([
     getAllFoods(),
     getAllDayLogs(),
     getAllDayTotals(),
     getSettings(),
     getAllRecipes(),
+    getAllBodyLogs(),
+    getAllSupplements(),
   ]);
-  return { version: 2, exportedAt: new Date().toISOString(), foods, logs, totals, settings, recipes };
+  return {
+    version: 3,
+    exportedAt: new Date().toISOString(),
+    foods, logs, totals, settings, recipes,
+    bodyLogs, supplements,
+  };
 }
 
 export async function importAll(data) {
-  if (!data || (data.version !== 1 && data.version !== 2)) throw new Error("Invalid backup file");
+  const OK = [1, 2, 3];
+  if (!data || !OK.includes(data.version)) throw new Error("Invalid backup file");
   for (const f of (data.foods || [])) await saveFood(f);
   for (const l of (data.logs || [])) { const { date, ...rest } = l; await saveDayLog(date, rest); }
   for (const t of (data.totals || [])) { const { date, ...rest } = t; await saveDayTotals(date, rest); }
   for (const [k, v] of Object.entries(data.settings || {})) await saveSetting(k, v);
   for (const r of (data.recipes || [])) await saveRecipe(r);
+  for (const b of (data.bodyLogs || [])) { const { date, ...rest } = b; await saveBodyLog(date, rest); }
+  for (const s of (data.supplements || [])) await saveSupplement(s);
 }
 
 // ─── SEEDING ────────────────────────────────────────────────────
