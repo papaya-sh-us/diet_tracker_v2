@@ -3,7 +3,7 @@ import {
   DndContext, closestCenter, PointerSensor, TouchSensor,
   useSensor, useSensors, DragOverlay,
 } from "@dnd-kit/core";
-import { SortableContext, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
+import { SortableContext, rectSortingStrategy, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable";
 import {
   C, todayKey, dateKey, parseDate, scaleNutrients, scaleCost,
   emptyTotals, addTotals, formatDateLong, recipeNutrients, recipeCost,
@@ -60,16 +60,29 @@ export default function App() {
   const [adjustCard, setAdjustCard] = useState(null); // { key, label, unit }
   // drag state for small cards
   const [cardDragActive, setCardDragActive] = useState(null);
+  // Whether the small nutrient cards are in "manage" state (remove ✕ visible,
+  // dragging enabled). Off by default; a long-press on any card turns it on
+  // for all of them together, a tap on any card turns it back off.
+  const [cardsEditMode, setCardsEditMode] = useState(false);
 
   const allNutrients = useMemo(() => buildNutrients(customNutrients), [customNutrients]);
   const nutrientKeys = useMemo(() => allNutrients.map(n => n.key), [allNutrients]);
   const isToday = activeDate === todayKey();
   const showEditable = isToday || editingPast;
 
-  // dnd-kit sensors — 8px activation distance prevents accidental drags on tap
+  // dnd-kit sensors for the food rows inside meals — unaffected by card edit mode
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 10 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 450, tolerance: 8 } }),
+  );
+  // Separate sensors for the small nutrient cards. Dragging on these is fully
+  // disabled per-card (see SortableSmallCard's `disabled` option) until
+  // cardsEditMode is on, so once it IS on, activation can be near-instant —
+  // the long-press to enter the mode already served as the "are you sure"
+  // gesture, so requiring a second long wait to actually drag would feel redundant.
+  const cardSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: cardsEditMode ? 4 : 10 } }),
+    useSensor(TouchSensor, { activationConstraint: cardsEditMode ? { delay: 50, tolerance: 8 } : { delay: 450, tolerance: 8 } }),
   );
 
   useEffect(() => {
@@ -432,8 +445,7 @@ export default function App() {
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "13px 14px", position: "sticky", top: 0, zIndex: 50 }}>
         <div style={{ maxWidth: 600, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1.2 }}>Yashus · Nutrition Tracker</div>
-            <div style={{ fontSize: 13, color: C.muted }}>Long-press any card to adjust · drag ⠿ to reorder</div>
+            <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1.2 }}>Nutrition Tracker</div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <Button variant="ghost" onClick={() => setShowDB(true)} style={{ padding: "7px 10px" }}>🍎</Button>
@@ -473,7 +485,7 @@ export default function App() {
           {/* Cost card — always first */}
           <div style={{ marginBottom: 8 }}>
             <PressHoldCard
-              onLongPress={() => setAdjustCard({ key: "cost", label: "Cost", unit: "₹" })}
+              onTapEdit={() => setAdjustCard({ key: "cost", label: "Cost", unit: "₹" })}
               adj={todayAdj.cost || 0}
               onRemoveAdj={() => removeCardAdj("cost")}
             >
@@ -482,20 +494,20 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <PressHoldCard onLongPress={() => setAdjustCard({ key: "protein", label: "Protein", unit: "g" })} adj={todayAdj.protein || 0} onRemoveAdj={() => removeCardAdj("protein")}>
+            <PressHoldCard onTapEdit={() => setAdjustCard({ key: "protein", label: "Protein", unit: "g" })} adj={todayAdj.protein || 0} onRemoveAdj={() => removeCardAdj("protein")}>
               <BigCard label="Protein" value={`${Math.round(totals.protein)}g`} sub={`/ ${targets.protein}g`} pct={pctOf(totals.protein, targets.protein)} color={C.accent} />
             </PressHoldCard>
-            <PressHoldCard onLongPress={() => setAdjustCard({ key: "kcal", label: "Calories", unit: "kcal" })} adj={todayAdj.kcal || 0} onRemoveAdj={() => removeCardAdj("kcal")}>
+            <PressHoldCard onTapEdit={() => setAdjustCard({ key: "kcal", label: "Calories", unit: "kcal" })} adj={todayAdj.kcal || 0} onRemoveAdj={() => removeCardAdj("kcal")}>
               <BigCard label="Calories" value={Math.round(totals.kcal)} sub={`/ ${targets.kcal}`} pct={pctOf(totals.kcal, targets.kcal)} color={C.info} />
             </PressHoldCard>
           </div>
 
           {/* Small draggable nutrient cards */}
-          <DndContext sensors={sensors} collisionDetection={closestCenter}
+          <DndContext sensors={cardSensors} collisionDetection={closestCenter}
             onDragStart={e => setCardDragActive(e.active.id)}
             onDragEnd={handleCardDragEnd}
             onDragCancel={() => setCardDragActive(null)}>
-            <SortableContext items={visibleCards} strategy={verticalListSortingStrategy}>
+            <SortableContext items={visibleCards} strategy={rectSortingStrategy}>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {visibleCards.map(key => {
                   const n = allNutrients.find(x => x.key === key); if (!n) return null;
@@ -506,8 +518,11 @@ export default function App() {
                     <SortableSmallCard key={key} n={n} value={v} pct={pctOf(v, tgt)}
                       adj={adj}
                       onRemove={() => setVisibleCards(prev => prev.filter(k => k !== key))}
-                      onLongPress={() => setAdjustCard({ key, label: n.label, unit: n.unit || "" })}
+                      onTapEdit={() => setAdjustCard({ key, label: n.label, unit: n.unit || "" })}
                       onRemoveAdj={() => removeCardAdj(key)}
+                      editMode={cardsEditMode}
+                      onEnterEditMode={() => setCardsEditMode(true)}
+                      onExitEditMode={() => setCardsEditMode(false)}
                     />
                   );
                 })}
@@ -657,15 +672,11 @@ export default function App() {
   );
 }
 
-// ─── Press-hold wrapper ───────────────────────────────────────────────────────
-function PressHoldCard({ children, onLongPress, adj, onRemoveAdj }) {
-  const timerRef = useRef(null);
-  const start = () => { timerRef.current = setTimeout(onLongPress, 500); };
-  const cancel = () => { clearTimeout(timerRef.current); };
+// ─── Tap-to-edit wrapper (Cost / Protein / Calories cards) ────────────────────
+function PressHoldCard({ children, onTapEdit, adj, onRemoveAdj }) {
   return (
-    <div style={{ flex: 1, position: "relative", userSelect: "none" }}
-      onMouseDown={start} onMouseUp={cancel} onMouseLeave={cancel}
-      onTouchStart={start} onTouchEnd={cancel} onTouchCancel={cancel}>
+    <div style={{ flex: 1, position: "relative", userSelect: "none", cursor: "pointer" }}
+      onClick={onTapEdit}>
       {children}
       {adj !== 0 && (
         <div style={{ position: "absolute", bottom: 5, right: 6, fontSize: 9, color: adj > 0 ? C.veg : C.danger, background: C.bg, borderRadius: 4, padding: "1px 4px", border: `1px solid ${adj > 0 ? C.veg : C.danger}`, display: "flex", alignItems: "center", gap: 3 }}>
@@ -681,30 +692,54 @@ function PressHoldCard({ children, onLongPress, adj, onRemoveAdj }) {
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-function SortableSmallCard({ n, value, pct, adj, onRemove, onLongPress, onRemoveAdj }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: n.key });
-  const [hover, setHover] = useState(false);
-  const timerRef = useRef(null);
+function SortableSmallCard({ n, value, pct, adj, onRemove, onTapEdit, onRemoveAdj, editMode, onEnterEditMode, onExitEditMode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: n.key, disabled: !editMode });
   const met = n.lessIsBetter ? (value <= (n.target || Infinity)) : (value >= (n.target || 0));
+  const timerRef = useRef(null);
+  const justLongPressedRef = useRef(false); // suppresses the click that follows a long-press release
 
-  const startLong = () => { timerRef.current = setTimeout(onLongPress, 500); };
-  const cancelLong = () => clearTimeout(timerRef.current);
+  // Slow the repositioning animation down (dnd-kit defaults to ~200ms) so
+  // neighboring cards drift into place calmly instead of snapping instantly.
+  const slowedTransition = transition ? transition.replace(/[\d.]+ms/, "320ms") : transition;
 
   const style = {
     transform: CSS.Transform.toString(transform),
-    transition,
+    transition: slowedTransition,
     opacity: isDragging ? 0.4 : 1,
     flex: "1 1 28%", minWidth: 92, position: "relative",
     touchAction: "none",
   };
 
+  // Manual long-press detection, only active while NOT already in edit mode
+  // (once in edit mode, dnd-kit's own sensors take over the same gesture for
+  // dragging, so we don't want two systems racing for the same press).
+  const startPress = () => {
+    if (editMode) return;
+    justLongPressedRef.current = false;
+    timerRef.current = setTimeout(() => {
+      justLongPressedRef.current = true;
+      onEnterEditMode();
+    }, 500);
+  };
+  const cancelPress = () => clearTimeout(timerRef.current);
+
+  const handleClick = () => {
+    if (justLongPressedRef.current) {
+      // This click is just the release-tail of the long-press that already
+      // opened edit mode — ignore it so it doesn't immediately close again.
+      justLongPressedRef.current = false;
+      return;
+    }
+    if (editMode) onExitEditMode();
+    else onTapEdit();
+  };
+
   return (
     <div ref={setNodeRef} style={style}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => { setHover(false); cancelLong(); }}
-      onMouseDown={startLong} onMouseUp={cancelLong}
-      onTouchStart={startLong} onTouchEnd={cancelLong} onTouchCancel={cancelLong}>
-      <div {...attributes} {...listeners}
-        style={{ background: C.card, border: `1px solid ${n.custom ? C.purple : met ? "rgba(74,222,128,0.3)" : C.border}`, borderRadius: 10, padding: "8px 10px", cursor: "grab" }}>
+      onPointerDown={startPress} onPointerUp={cancelPress} onPointerLeave={cancelPress}
+      onTouchStart={startPress} onTouchEnd={cancelPress} onTouchCancel={cancelPress}>
+      <div {...attributes} {...listeners} onClick={handleClick}
+        style={{ background: C.card, border: `1px solid ${n.custom ? C.purple : met ? "rgba(74,222,128,0.3)" : C.border}`, borderRadius: 10, padding: "8px 10px", cursor: editMode ? "grab" : "pointer" }}>
         <div style={{ fontSize: 10, color: C.muted, display: "flex", justifyContent: "space-between" }}>
           <span>{n.label}{n.custom ? <span style={{ color: C.purple }}> ◆</span> : ""}</span>
           <span>{pct}%</span>
@@ -713,7 +748,11 @@ function SortableSmallCard({ n, value, pct, adj, onRemove, onLongPress, onRemove
           {value}<span style={{ fontSize: 9, color: C.muted }}> {n.unit}</span>
         </div>
       </div>
-      {hover && <button onClick={onRemove} title="Remove card" style={{ position: "absolute", top: -7, right: -7, width: 18, height: 18, borderRadius: 99, background: C.danger, color: "#0b0d0e", border: "none", cursor: "pointer", fontSize: 11, fontWeight: 800, lineHeight: 1 }}>×</button>}
+      {/* Remove button only appears once a long-press has put the row into
+          manage mode — tapping any card exits the mode and hides it again. */}
+      {editMode && (
+        <button onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Remove card" style={{ position: "absolute", top: -7, right: -7, width: 18, height: 18, borderRadius: 99, background: C.danger, color: "#0b0d0e", border: "none", cursor: "pointer", fontSize: 11, fontWeight: 800, lineHeight: 1 }}>×</button>
+      )}
       {adj !== 0 && (
         <div style={{ position: "absolute", bottom: 4, right: 5, fontSize: 8, color: adj > 0 ? C.veg : C.danger, background: C.bg, borderRadius: 3, padding: "0 3px", border: `1px solid ${adj > 0 ? C.veg : C.danger}`, display: "flex", alignItems: "center", gap: 2 }}>
           {adj > 0 ? "+" : ""}{adj}

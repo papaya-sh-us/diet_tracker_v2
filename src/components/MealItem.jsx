@@ -70,7 +70,6 @@ export default function MealItem({
             cursor: "pointer", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
           }}>
             {food.name}
-            {pinned && <span style={{ fontSize: 9, color: C.accent, border: `1px solid ${C.accentDark}`, borderRadius: 4, padding: "0 4px" }}>PIN</span>}
             <ConfidenceBadge confidence={food.confidence} />
           </div>
 
